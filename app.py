@@ -6,6 +6,14 @@ import tempfile
 import platform
 import json
 
+# Add pyswip import
+try:
+    from pyswip import Prolog
+    PYSWIP_AVAILABLE = True
+except ImportError:
+    PYSWIP_AVAILABLE = False
+    st.warning("PySwip not found. Install with: pip install pyswip")
+
 # Configuration
 TEMP_DIR = tempfile.gettempdir()
 FACTS_FILE = os.path.join(TEMP_DIR, "user_symptoms.pl")
@@ -120,59 +128,141 @@ def run_prolog_diagnosis():
         st.error(f"Error reading results: {e}")
         return []
 
+# Load disease rules from the Prolog file using pyswip
+def load_disease_rules_from_prolog():
+    if not PYSWIP_AVAILABLE:
+        return {}
+    
+    try:
+        prolog = Prolog()
+        prolog.consult(get_prolog_kb_path())
+        
+        # Extract disease rules from Prolog file
+        disease_rules = {}
+        
+        # Get all disease predicates
+        for disease_query in list(prolog.query("clause(disease(X), Body)")):
+            disease_name = disease_query["X"]
+            disease_rules[disease_name] = {
+                "required": set(),
+                "not_present": set(),
+                "any_of": set()
+            }
+            
+            # Parse the disease body to extract rules
+            body_str = str(disease_query["Body"])
+            
+            # Extract positive symptoms (has_symptom)
+            has_symptoms = re.findall(r'has_symptom\((\w+)\)', body_str)
+            disease_rules[disease_name]["required"].update(has_symptoms)
+            
+            # Extract negative symptoms (not has_symptom)
+            not_symptoms = re.findall(r'not\(has_symptom\((\w+)\)\)', body_str)
+            disease_rules[disease_name]["not_present"].update(not_symptoms)
+            
+            # Extract any_of conditions (symptom1; symptom2)
+            or_conditions = re.findall(r'\(has_symptom\((\w+)\);\s*has_symptom\((\w+)\)\)', body_str)
+            for or_cond in or_conditions:
+                # Remove these from required since they're in any_of
+                for symptom in or_cond:
+                    if symptom in disease_rules[disease_name]["required"]:
+                        disease_rules[disease_name]["required"].remove(symptom)
+                disease_rules[disease_name]["any_of"].update(or_cond)
+            
+            # Set minimum match requirements (default to 1 if very few symptoms, else 2)
+            required_count = len(disease_rules[disease_name]["required"])
+            disease_rules[disease_name]["min_match"] = 1 if required_count <= 2 else 2
+            
+        return disease_rules
+    
+    except Exception as e:
+        st.error(f"Error loading disease rules from Prolog: {e}")
+        return {}
+
+# Load treatments from the Prolog file using pyswip
+def load_treatments_from_prolog():
+    if not PYSWIP_AVAILABLE:
+        return {}
+    
+    try:
+        prolog = Prolog()
+        prolog.consult(get_prolog_kb_path())
+        
+        treatments = {}
+        for treatment in list(prolog.query("treatment(Disease, Treatment)")):
+            disease_name = treatment["Disease"]
+            treatment_text = treatment["Treatment"]
+            treatments[disease_name] = treatment_text
+            
+        return treatments
+    
+    except Exception as e:
+        st.error(f"Error loading treatments from Prolog: {e}")
+        return {}
+
 # Fallback method that doesn't rely on Prolog - uses our own rule engine
 def fallback_diagnose(selected_symptoms):
     selected_symptoms_set = set(selected_symptoms)
-      # Define disease rules
-    disease_rules = {
-        "common_cold": {
-            "required": {"cough", "runny_nose", "sneezing", "sore_throat"},
-            "not_present": {"high_fever", "severe_headache"},
-            "min_match": 2
-        },
-        "flu": {
-            "required": {"fever", "body_ache", "fatigue", "cough", "headache"},
-            "min_match": 2
-        },
-        "covid_19": {
-            "required": {"fever", "cough", "fatigue"},
-            "any_of": {"loss_of_taste", "loss_of_smell"},
-            "min_match": 2
-        },
-        "allergies": {
-            "required": {"sneezing", "runny_nose", "itchy_eyes"},
-            "not_present": {"fever"},
-            "min_match": 2
-        },        "food_poisoning": {
-            "required": {"nausea", "vomiting", "diarrhea", "abdominal_pain"},
-            "min_match": 2
-        },
-        "migraine": {
-            "required": {"severe_headache", "sensitivity_to_light", "nausea"},
-            "any_of": {"dizziness", "blurred_vision"},
-            "min_match": 1
-        },
-        "gastroenteritis": {
-            "required": {"diarrhea", "abdominal_pain", "nausea", "vomiting", "fever"},
-            "min_match": 2
-        },
-        "pneumonia": {
-            "required": {"cough", "fever", "shortness_of_breath", "chest_pain", "fatigue"},
-            "min_match": 2
-        }
-    }
     
-    # Define treatments
-    treatments = {
-        "common_cold": "Rest, drink plenty of fluids, over-the-counter pain relievers may help with symptoms.",
-        "flu": "Rest, stay hydrated, take acetaminophen or ibuprofen for fever and aches. Antiviral medications if prescribed within 48 hours of symptoms.",
-        "covid_19": "Isolate, rest, stay hydrated, monitor symptoms. Seek medical attention if experiencing severe symptoms. Follow local health guidelines.",
-        "allergies": "Avoid allergens, take antihistamines, use nasal sprays. Consider allergy testing for long-term management.",
-        "food_poisoning": "Stay hydrated, rest, ease back into eating with bland foods. Seek medical attention for severe symptoms or if not improving after 2 days.",
-        "migraine": "Rest in a quiet, dark room, pain relievers, prescription medications for prevention and treatment.",
-        "gastroenteritis": "Stay hydrated, rest, eat bland foods when returning to eating. Seek medical attention if symptoms are severe or persistent.",
-        "pneumonia": "Antibiotics (for bacterial pneumonia), rest, increased fluid intake, medication for fever. Hospitalization may be required in severe cases."
-    }
+    # First try to load rules and treatments from Prolog file using pyswip
+    disease_rules = load_disease_rules_from_prolog()
+    treatments = load_treatments_from_prolog()
+    
+    # If pyswip failed or returned empty results, use hardcoded rules
+    if not disease_rules:
+        # Define disease rules
+        disease_rules = {
+            "common_cold": {
+                "required": {"cough", "runny_nose", "sneezing", "sore_throat"},
+                "not_present": {"high_fever", "severe_headache"},
+                "min_match": 2
+            },
+            "flu": {
+                "required": {"fever", "body_ache", "fatigue", "cough", "headache"},
+                "min_match": 2
+            },
+            "covid_19": {
+                "required": {"fever", "cough", "fatigue"},
+                "any_of": {"loss_of_taste", "loss_of_smell"},
+                "min_match": 2
+            },
+            "allergies": {
+                "required": {"sneezing", "runny_nose", "itchy_eyes"},
+                "not_present": {"fever"},
+                "min_match": 2
+            },
+            "food_poisoning": {
+                "required": {"nausea", "vomiting", "diarrhea", "abdominal_pain"},
+                "min_match": 2
+            },
+            "migraine": {
+                "required": {"severe_headache", "sensitivity_to_light", "nausea"},
+                "any_of": {"dizziness", "blurred_vision"},
+                "min_match": 1
+            },
+            "gastroenteritis": {
+                "required": {"diarrhea", "abdominal_pain", "nausea", "vomiting", "fever"},
+                "min_match": 2
+            },
+            "pneumonia": {
+                "required": {"cough", "fever", "shortness_of_breath", "chest_pain", "fatigue"},
+                "min_match": 2
+            }
+        }
+    
+    # If pyswip failed to get treatments or returned empty results, use hardcoded treatments
+    if not treatments:
+        treatments = {
+            "common_cold": "Rest, drink plenty of fluids, over-the-counter pain relievers may help with symptoms.",
+            "flu": "Rest, stay hydrated, take acetaminophen or ibuprofen for fever and aches. Antiviral medications if prescribed within 48 hours of symptoms.",
+            "covid_19": "Isolate, rest, stay hydrated, monitor symptoms. Seek medical attention if experiencing severe symptoms. Follow local health guidelines.",
+            "allergies": "Avoid allergens, take antihistamines, use nasal sprays. Consider allergy testing for long-term management.",
+            "food_poisoning": "Stay hydrated, rest, ease back into eating with bland foods. Seek medical attention for severe symptoms or if not improving after 2 days.",
+            "migraine": "Rest in a quiet, dark room, pain relievers, prescription medications for prevention and treatment.",
+            "gastroenteritis": "Stay hydrated, rest, eat bland foods when returning to eating. Seek medical attention if symptoms are severe or persistent.",
+            "pneumonia": "Antibiotics (for bacterial pneumonia), rest, increased fluid intake, medication for fever. Hospitalization may be required in severe cases."
+        }
+    
     results = []
     
     # Special case for common symptom combinations
